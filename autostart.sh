@@ -8,7 +8,7 @@
 cd "$(dirname "$0")"
 
 if [ ! -f config.env ] || [ ! -f secrets.env ]; then
-  echo "autostart: not set up yet — run once in a terminal:  bash setup.sh"
+  echo "autostart: not set up yet — open a terminal and firstrun.sh will ask for the token, or run:  bash firstrun.sh"
   exit 0
 fi
 source config.env

@@ -25,9 +25,12 @@ EXTRA_ARGS=""
 MODEL_FILE="$(basename "${MODEL_URL%%\?*}")"
 mkdir -p models llama
 
-echo "==> [1/4] bot credentials (asked once, then never again)"
+echo "==> [1/4] bot credentials"
+# This script NEVER prompts. It also runs as postCreateCommand, whose
+# creation-log terminal cannot take input — a prompt there only stalls.
+# Credentials come from, in order: an existing secrets.env, environment
+# variables (Codespaces secrets), or firstrun.sh in a real terminal.
 if [ ! -f secrets.env ] && [ -n "${BOT_TOKEN:-}" ] && [ -n "${OWNER_ID:-}" ]; then
-  # Credentials arrived as environment variables (e.g. Codespaces secrets).
   if curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getMe" | grep -q '"ok":true'; then
     printf 'BOT_TOKEN=%s\nOWNER_ID=%s\n' "$BOT_TOKEN" "$OWNER_ID" > secrets.env
     chmod 600 secrets.env
@@ -35,43 +38,9 @@ if [ ! -f secrets.env ] && [ -n "${BOT_TOKEN:-}" ] && [ -n "${OWNER_ID:-}" ]; th
   fi
 fi
 if [ -f secrets.env ]; then
-  echo "    secrets.env already exists — not asking again."
-elif [ -t 0 ]; then
-  # A lifecycle (postCreate) terminal may be a pty nobody can type into —
-  # never block forever: 180s to answer, then setup CONTINUES without
-  # credentials and the student runs this script once in a real terminal.
-  read -t 180 -rp "    Telegram bot token (from BotFather): " BOT_TOKEN || BOT_TOKEN=""
-  read -t 180 -rp "    Your numeric Telegram user ID (from @userinfobot): " OWNER_ID || OWNER_ID=""
-  if [ -z "$BOT_TOKEN" ] || [ -z "$OWNER_ID" ]; then
-    echo "    ⚠️ no credentials given (timed out) — continuing WITHOUT them."
-    echo "       After creation finishes, run once in a terminal:  bash setup.sh && bash autostart.sh"
-  elif ! curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getMe" | grep -q '"ok":true'; then
-    echo "    ❌ Telegram rejected that token — nothing saved. Re-run: bash setup.sh"
-    exit 1
-  else
-    case "$OWNER_ID" in
-      *[!0-9]*|"") echo "    ❌ user ID must be digits only — nothing saved. Re-run: bash setup.sh"; exit 1 ;;
-    esac
-    printf 'BOT_TOKEN=%s\nOWNER_ID=%s\n' "$BOT_TOKEN" "$OWNER_ID" > secrets.env
-    chmod 600 secrets.env
-    echo "    token OK ✅ — saved to secrets.env (never asked again)"
-  fi
+  echo "    secrets.env present ✅"
 else
-  echo "    ⚠️ no interactive terminal and no secrets.env — run once in a terminal:  bash setup.sh"
-fi
-
-if [ ! -f secrets.env ]; then
-  REPO_DIR="$(pwd)"
-  if ! grep -q "qwen-agent-first-run" ~/.bashrc 2>/dev/null; then
-    cat >> ~/.bashrc << EOF_BASHRC
-# qwen-agent-first-run
-if [ ! -f "$REPO_DIR/secrets.env" ] && [ -t 0 ]; then
-  echo "🤖 First run: the agent still needs its bot token + your numeric ID."
-  bash "$REPO_DIR/setup.sh" && bash "$REPO_DIR/autostart.sh"
-fi
-EOF_BASHRC
-    echo "    (first-terminal rescue armed: open any terminal if I could not ask for credentials)"
-  fi
+  echo "    no credentials yet — after setup, open a terminal and I'll ask there (once, no timer)."
 fi
 
 echo "==> [2/4] llama.cpp binary (pinned b11878)"
@@ -131,6 +100,21 @@ sudo apt-get install -y -qq --no-install-recommends tor > /dev/null 2>&1 || echo
 if [ -x ./.venv/bin/playwright ]; then
   ( setsid ./.venv/bin/playwright install --with-deps chromium >> setup.log 2>&1 & ) || true
   echo "    tor ready; Chromium for Playwright installs in the background (setup.log)"
+fi
+
+# If credentials are still missing, arm the first-terminal wizard.
+if [ ! -f secrets.env ]; then
+  REPO_DIR="$(pwd)"
+  sed -i '/agent-first-run/,+4d' ~/.bashrc 2>/dev/null || true
+  if ! grep -q "agent-firstrun" ~/.bashrc 2>/dev/null; then
+    cat >> ~/.bashrc << EOF_BASHRC
+# agent-firstrun
+if [ ! -f "$REPO_DIR/secrets.env" ] && [ -t 0 ]; then
+  bash "$REPO_DIR/firstrun.sh"
+fi
+EOF_BASHRC
+    echo "    first-terminal wizard armed (open any terminal to finish setup)"
+  fi
 fi
 
 echo ""
