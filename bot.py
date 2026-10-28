@@ -290,6 +290,87 @@ def compose(reasoning: str, content: str, final: bool = False) -> str:
     return "\n".join(parts) if parts else "🧠 دارم فکر می‌کنم..."
 
 
+def _partial_json_str(args: str, key: str) -> str:
+    """Decode a JSON string field from possibly-incomplete tool-call arguments."""
+    m = re.search(r'"' + re.escape(key) + r'"\s*:\s*"', args)
+    if not m:
+        return ""
+    out = []
+    i = m.end()
+    simple = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
+              "n": "\n", "r": "\r", "t": "\t"}
+    while i < len(args):
+        ch = args[i]
+        if ch == '"':
+            break
+        if ch == "\\":
+            if i + 1 >= len(args):
+                break
+            esc = args[i + 1]
+            if esc in simple:
+                out.append(simple[esc])
+                i += 2
+                continue
+            if esc == "u":
+                hexpart = args[i + 2:i + 6]
+                if len(hexpart) == 4 and all(c in "0123456789abcdefABCDEF" for c in hexpart):
+                    out.append(chr(int(hexpart, 16)))
+                    i += 6
+                    continue
+                break
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _tool_preview(tool_calls: dict) -> str:
+    """Live view of the code a tool call is generating right now."""
+    if not tool_calls:
+        return ""
+    slot = tool_calls[max(tool_calls)]
+    args = slot.get("arguments", "")
+    body = _partial_json_str(args, "content") or _partial_json_str(args, "command")
+    if not body:
+        return ""
+    head = f"🛠 <code>{html.escape(slot.get('name') or 'tool')}</code>"
+    path = _partial_json_str(args, "path")
+    if path:
+        head += f" — <code>{html.escape(path)}</code>"
+    tail = body[-1000:]
+    if len(body) > 1000:
+        tail = "…" + tail
+    return f"{head}\n<pre>{html.escape(tail)}</pre>"
+
+
+def _tool_counter(tool_calls: dict) -> str:
+    """Fallback when the live preview would overflow one Telegram message."""
+    if not tool_calls:
+        return ""
+    slot = tool_calls[max(tool_calls)]
+    body = _partial_json_str(slot.get("arguments", ""), "content")
+    if not body:
+   	    return ""
+    name = html.escape(slot.get("name") or "tool")
+    return f"🛠 <code>{name}</code> — در حال تولید کد... ({len(body)} نویسه)"
+
+
+def _files_suffix(calls: list) -> str:
+    """Persist finished write_file contents in the chat record."""
+    out = []
+    for c in calls:
+        if c.get("name") != "write_file":
+            continue
+        try:
+            a = json.loads(c.get("arguments") or "{}")
+        except ValueError:
+            continue
+        body = a.get("content") or ""
+        if body:
+            out.append(f"📄 <code>{html.escape(a.get('path', ''))}</code>\n{html.escape(body)}")
+    return ("\n\n" + "\n\n".join(out)) if out else ""
+
+
 async def _edit(msg, text: str) -> bool:
     for _ in range(5):
         try:
@@ -389,6 +470,12 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         now = time.monotonic()
                         inline_thought, visible = split_thought(content)
                         preview = compose(reasoning + inline_thought, visible)
+                        tp = _tool_preview(tool_calls)
+                        if tp:
+                            if len(preview) + len(tp) + 2 <= 3900:
+                                preview += "\n\n" + tp
+                            else:
+                                preview += "\n\n" + _tool_counter(tool_calls)
                         if now - last_edit >= 1.5 and abs(len(preview) - last_len) >= 20:
                             last_edit, last_len = now, len(preview)
                             await box.show(preview)
@@ -428,7 +515,7 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     cmd_texts.append("")
             note = (f"🛠 در حال اجرا: {names}" if not cmd_texts else
                     f"🛠 ابزارها آماده‌ان — دستور ترمینال منتظر تأیید توئه: {names}")
-            await box.seal_with_note(compose(full_reasoning, visible, final=True), note)
+            await box.seal_with_note(compose(full_reasoning, visible, final=True) + _files_suffix(calls), note)
             approved = True
             if cmd_texts:
                 approved = await ask_confirm(context, chat_id, cmd_texts)
