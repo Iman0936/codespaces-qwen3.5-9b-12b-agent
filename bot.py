@@ -438,7 +438,7 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for _step in range(MAX_STEPS):
         reasoning, content = "", ""
         tool_calls: dict[int, dict] = {}
-        last_edit, last_len = 0.0, 0
+        last_edit, last_shown = 0.0, ""
         try:
             payload = {"model": MODEL_ALIAS, "messages": [{"role": "system", "content": system_prompt}] + EXAMPLE + messages, "tools": TOOLS,
                        "max_tokens": MAX_TOKENS, "stream": True, **SAMPLING}
@@ -476,8 +476,8 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                                 preview += "\n\n" + tp
                             else:
                                 preview += "\n\n" + _tool_counter(tool_calls)
-                        if now - last_edit >= 1.5 and abs(len(preview) - last_len) >= 20:
-                            last_edit, last_len = now, len(preview)
+                        if now - last_edit >= 1.5 and preview != last_shown:
+                            last_edit, last_shown = now, preview
                             await box.show(preview)
         except Exception:
             pass  # stream broke — work with whatever arrived
