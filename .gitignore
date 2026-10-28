@@ -1,0 +1,11 @@
+secrets.env
+config.env
+models/
+llama/
+llama-src/
+.venv/
+history.json
+*.log
+*.pid
+server_cmd.sh
+__pycache__/
