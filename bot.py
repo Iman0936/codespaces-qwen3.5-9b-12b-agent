@@ -345,19 +345,22 @@ def _tool_counter(tool_calls: dict) -> str:
     return f"🛠 <code>{name}</code> — در حال تولید کد... ({len(body)} نویسه)"
 
 
-def _files_suffix(calls: list) -> str:
-    """Persist finished write_file contents in the chat record."""
+def _calls_suffix(calls: list) -> str:
+    """Persist the step's generated code in the chat record: file contents
+    and the full text of terminal commands (heredocs included), so the code
+    stays on screen after the step seals. Silent memory writes are skipped."""
     out = []
     for c in calls:
-        if c.get("name") != "write_file":
-            continue
         try:
             a = json.loads(c.get("arguments") or "{}")
         except ValueError:
             continue
-        body = a.get("content") or ""
-        if body:
-            out.append(f"📄 <code>{html.escape(a.get('path', ''))}</code>\n{html.escape(body)}")
+        if c.get("name") == "write_file" and (a.get("content") or ""):
+            out.append(f"📄 <code>{html.escape(a.get('path', ''))}</code>\n{html.escape(a['content'])}")
+        elif c.get("name") == "run_command":
+            cmd = a.get("command") or ""
+            if cmd and not _is_mem_write(cmd):
+                out.append(f"🖥 <code>run_command</code>\n{html.escape(cmd)}")
     return ("\n\n" + "\n\n".join(out)) if out else ""
 
 
@@ -436,6 +439,7 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     while len(history) > 2 and sum(len(m["content"]) for m in history) > MAX_HISTORY_CHARS:
         del history[:2]
     messages = list(history)
+    cancels = 0
 
     system_prompt = build_system_prompt()
     first = await update.message.reply_text("🧠 دارم فکر می‌کنم...")
@@ -445,6 +449,7 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         reasoning, content = "", ""
         tool_calls: dict[int, dict] = {}
         last_edit, last_shown = 0.0, ""
+        last_tp, last_tp_at, last_tp_args = "", 0.0, 0
         try:
             payload = {"model": MODEL_ALIAS, "messages": [{"role": "system", "content": system_prompt}] + EXAMPLE + messages, "tools": TOOLS,
                        "max_tokens": MAX_TOKENS, "stream": True, **SAMPLING}
@@ -476,12 +481,14 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         now = time.monotonic()
                         inline_thought, visible = split_thought(content)
                         preview = compose(reasoning + inline_thought, visible)
-                        tp = _tool_preview(tool_calls)
-                        if tp:
-                            if len(preview) + len(tp) + 2 <= 3900:
-                                preview += "\n\n" + tp
-                            else:
-                                preview += "\n\n" + _tool_counter(tool_calls)
+                        total_args = sum(len(t2["arguments"]) for t2 in tool_calls.values())
+                        if tool_calls and (now - last_tp_at >= 3.5 or total_args - last_tp_args >= 150):
+                            last_tp_at, last_tp_args = now, total_args
+                            last_tp = _tool_preview(tool_calls)
+                            if last_tp and len(preview) + len(last_tp) + 2 > 3900:
+                                last_tp = _tool_counter(tool_calls)
+                        if last_tp:
+                            preview += "\n\n" + last_tp
                         if now - last_edit >= 1.5 and preview != last_shown:
                             last_edit, last_shown = now, preview
                             await box.show(preview)
@@ -522,7 +529,7 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             silent = _all_mem_writes(cmd_texts)
             note = (f"🛠 در حال اجرا: {names}" if not cmd_texts or silent else
                     f"🛠 ابزارها آماده‌ان — دستور ترمینال منتظر تأیید توئه: {names}")
-            await box.seal_with_note(compose(full_reasoning, visible, final=True) + _files_suffix(calls), note)
+            await box.seal_with_note(compose(full_reasoning, visible, final=True) + _calls_suffix(calls), note)
             approved = True
             if cmd_texts and not silent:
                 approved = await ask_confirm(context, chat_id, cmd_texts)
@@ -544,6 +551,13 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     tool_error_streak[chat_id] = 0
                 messages.append({"role": "tool", "tool_call_id": f"call_{i}",
                                  "content": result})
+            if cmd_texts and not approved:
+                cancels += 1
+                if cancels >= 2:
+                    await _send(context, chat_id, "🚫 دو لغو پیاپی — این دور متوقف شد. هر وقت آماده بودی دوباره بگو.")
+                    return
+            elif cmd_texts:
+                cancels = 0
             if tool_error_streak.get(chat_id, 0) >= 3:
                 tool_error_streak[chat_id] = 0
                 await _send(context, chat_id,
