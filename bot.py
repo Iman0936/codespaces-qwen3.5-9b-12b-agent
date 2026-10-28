@@ -107,11 +107,11 @@ def build_system_prompt() -> str:
         f"Current Time: {now_teh:%Y-%m-%d %H:%M} Tehran ({now_utc:%H:%M} UTC).\n"
         "CRITICAL RULES:\n"
         "1. REASON IN ENGLISH, SPEAK IN PERSIAN: To maximize your analytical IQ, you MUST do all your deep reasoning, problem-solving, and planning in English STRICTLY inside your thinking. However, your final direct message to the user MUST be exclusively in beautifully formatted Persian (فارسی).\n"
-        "2. TOOLS ARE YOUR HANDS: You act ONLY through native tool calls (run_command, read_file, write_file, list_files, fetch_url, send_file, get_datetime). NEVER print a command as plain text or inside a code block for the user to run — CALL the tool instead. A reply that merely describes a command without calling it is a failure.\n"
+        "2. TOOLS ARE YOUR HANDS: You act ONLY through native tool calls (run_command, read_file, list_files, fetch_url, send_file, get_datetime). NEVER print a command as plain text or inside a code block for the user to run — CALL the tool instead. A reply that merely describes a command without calling it is a failure.\n"
         "3. MAXIMIZE EFFICIENCY: Work fast. You are highly encouraged to emit MULTIPLE tool calls in a single response when they are independent, or chain shell commands using `&&`, to accomplish tasks in fewer steps.\n"
         "4. FILE OVERWRITE: Always use `>` to overwrite files, never `>>` for code (to avoid indentation issues). Save python code via `cat > script.py << 'EOF'`.\n"
         "5. ANTI-BOT & TOR BYPASS: If a website blocks you, use Tor (`socks5h://127.0.0.1:9050`) or `curl_cffi`. IMPORTANT: The Tor daemon is NOT running by default! You MUST start it first using run_command (`tor &`) and wait a few seconds before using the proxy.\n"
-        "6. SILENT STATE MANAGEMENT: Update memory.txt in the work folder (via write_file) whenever you learn important details, the current project state, or next steps — silently, without announcing it."
+        "6. SILENT STATE MANAGEMENT: Update memory.txt in the work folder (via run_command: cat > memory.txt <<'EOF' ... EOF — that exact form runs silently, with no confirmation) whenever you learn important details, the current project state, or next steps — silently, without announcing it."
     )
     memory_data = _tail(MEMORY_FILE, 2000)
     if memory_data:
@@ -159,12 +159,6 @@ TOOLS = [
         "description": "Read a text file inside the work folder.",
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string"}}, "required": ["path"]}}},
-    {"type": "function", "function": {
-        "name": "write_file",
-        "description": "Write (create or overwrite) a text file inside the work folder.",
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string"}, "content": {"type": "string"}},
-            "required": ["path", "content"]}}},
     {"type": "function", "function": {
         "name": "list_files",
         "description": "List files in the work folder (or a subfolder of it).",
@@ -217,13 +211,9 @@ async def exec_tool(name: str, args: dict, context, chat_id: int) -> str:
         except Exception as e:
             return f"ERROR: {e}"
     if name == "write_file":
-        try:
-            p = _safe_path(args["path"])
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(args.get("content", ""), encoding="utf-8")
-            return f"written: {p.name} ({p.stat().st_size} bytes)"
-        except Exception as e:
-            return f"ERROR: {e}"
+        return ("ERROR: write_file no longer exists. Create the file with run_command "
+                "using a heredoc (cat > path <<'EOF' ... EOF) — the code stays visible "
+                "in the chat that way.")
     if name == "list_files":
         try:
             p = _safe_path(args.get("path", "."))
@@ -423,6 +413,22 @@ class StreamBox:
 
 # ── agent loop ───────────────────────────────────────────────────────────────
 
+
+def _is_mem_write(cmd: str) -> bool:
+    """True only for a pure memory.txt heredoc overwrite and nothing else:
+    first line cat > memory.txt <<'EOF', last line EOF, and no earlier
+    line equal to the tag — so nothing can be smuggled after the heredoc."""
+    lines = (cmd or "").strip().splitlines()
+    if len(lines) < 2:
+        return False
+    if not re.match(r"cat\s*>\s*(?:\./)?memory\.txt\s*<<\s*'?(EOF)'?\s*$", lines[0].strip()):
+        return False
+    return lines[-1].strip() == "EOF" and all(l.strip() != "EOF" for l in lines[1:-1])
+
+
+def _all_mem_writes(cmd_texts: list) -> bool:
+    return bool(cmd_texts) and all(_is_mem_write(c) for c in cmd_texts)
+
 async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     history = histories.setdefault(chat_id, [])
@@ -513,11 +519,12 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     cmd_texts.append(json.loads(c["arguments"] or "{}").get("command", ""))
                 except ValueError:
                     cmd_texts.append("")
-            note = (f"🛠 در حال اجرا: {names}" if not cmd_texts else
+            silent = _all_mem_writes(cmd_texts)
+            note = (f"🛠 در حال اجرا: {names}" if not cmd_texts or silent else
                     f"🛠 ابزارها آماده‌ان — دستور ترمینال منتظر تأیید توئه: {names}")
             await box.seal_with_note(compose(full_reasoning, visible, final=True) + _files_suffix(calls), note)
             approved = True
-            if cmd_texts:
+            if cmd_texts and not silent:
                 approved = await ask_confirm(context, chat_id, cmd_texts)
             for i, c in enumerate(calls):
                 try:
