@@ -708,7 +708,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     histories.pop(update.effective_chat.id, None)
     _save_histories()
-    await update.message.reply_text("سلام! ایجنتت وصله 🤖 پیام بده، اگه لازم باشه خودش ابزار اجرا می‌کنه.")
+    await update.message.reply_text("سلام! ایجنتت وصله 🤖 پیام بده، اگه لازم باشه خودش ابزار اجرا می‌کنه.\n🧹 اگه خواستی حافظه‌ی ربات پاک بشه، دستور /reset رو بزن.")
 
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
