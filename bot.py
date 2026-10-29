@@ -106,7 +106,7 @@ def build_system_prompt() -> str:
         "inside a Linux GitHub Codespace. "
         f"Current Time: {now_teh:%Y-%m-%d %H:%M} Tehran ({now_utc:%H:%M} UTC).\n"
         "CRITICAL RULES:\n"
-        "1. REASON IN ENGLISH, SPEAK IN PERSIAN: To maximize your analytical IQ, you MUST do all your deep reasoning, problem-solving, and planning in English STRICTLY inside your thinking. However, your final direct message to the user MUST be exclusively in beautifully formatted Persian (فارسی).\n"
+        "1. REASON IN ENGLISH, SPEAK IN PERSIAN: To maximize your analytical IQ, you MUST do all your deep reasoning, problem-solving, and planning in English STRICTLY inside your thinking. Your thinking must be 100% English — NEVER write Persian or any other language inside your thinking, not even a single word. If a thought starts forming in Persian, restart that thought in English. However, your final direct message to the user MUST be exclusively in beautifully formatted Persian (فارسی).\n"
         "2. TOOLS ARE YOUR HANDS: You act ONLY through native tool calls (run_command, read_file, list_files, fetch_url, send_file, get_datetime). NEVER print a command as plain text or inside a code block for the user to run — CALL the tool instead. A reply that merely describes a command without calling it is a failure.\n"
         "3. MAXIMIZE EFFICIENCY: Work fast. You are highly encouraged to emit MULTIPLE tool calls in a single response when they are independent, or chain shell commands using `&&`, to accomplish tasks in fewer steps.\n"
         "4. FILE OVERWRITE: Always use `>` to overwrite files, never `>>` for code (to avoid indentation issues). Save python code via `cat > script.py << 'EOF'`.\n"
@@ -119,19 +119,29 @@ def build_system_prompt() -> str:
     log_data = _tail(SYSLOG_FILE, 1000)
     if log_data:
         prompt += f"\n\n--- AUTO SYSTEM LOGS ---\n{log_data}\n------------------------"
+    prompt += "\n\nFINAL REMINDER: Think ONLY in English — no Persian inside the thinking, ever. Reply to the user ONLY in Persian."
     return prompt
 
 
 # Fable's worked example, in native tool-calling form — primes the loop shape.
 EXAMPLE = [
     {"role": "user", "content": "یک ریکوئست ساده به گوگل بفرست."},
-    {"role": "assistant", "content": "باشه، الان انجام میدم:",
+    {"role": "assistant", "content": "<think>\nThe user wants a simple request sent to Google to check that it is reachable. I will call run_command with curl and keep the output short with head.\n</think>\n\nباشه، الان انجام میدم:",
      "tool_calls": [{"id": "call_0", "type": "function",
                      "function": {"name": "run_command",
                                   "arguments": json.dumps({"command": "curl -s https://google.com | head -n 5"})}}]},
     {"role": "tool", "tool_call_id": "call_0",
      "content": "<!doctype html><html><head><title>Google</title></head><body>...</body></html>"},
-    {"role": "assistant", "content": "انجام شد ✔ گوگل پاسخ داد و در دسترسه."},
+    {"role": "assistant", "content": "<think>\nThe curl call returned Google's homepage HTML, so the request worked and the site is reachable. I will confirm this briefly in Persian.\n</think>\n\nانجام شد ✔ گوگل پاسخ داد و در دسترسه."},
+]
+
+
+# A plain chat exchange that primes the thinking language: the thinking
+# is fully in English, the reply is fully in Persian. Injected right
+# after EXAMPLE on every request; never stored in the chat history.
+THINK_EXAMPLE = [
+    {"role": "user", "content": "پایتخت فرانسه کجاست؟"},
+    {"role": "assistant", "content": "<think>\nThe user is asking for the capital of France. That is Paris. I will answer directly and briefly in Persian.\n</think>\n\nپایتخت فرانسه پاریسه."},
 ]
 
 
@@ -451,7 +461,7 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         last_edit, last_shown = 0.0, ""
         last_tp, last_tp_at, last_tp_args = "", 0.0, 0
         try:
-            payload = {"model": MODEL_ALIAS, "messages": [{"role": "system", "content": system_prompt}] + EXAMPLE + messages, "tools": TOOLS,
+            payload = {"model": MODEL_ALIAS, "messages": [{"role": "system", "content": system_prompt}] + EXAMPLE + THINK_EXAMPLE + messages, "tools": TOOLS,
                        "max_tokens": MAX_TOKENS, "stream": True, **SAMPLING}
             async with httpx.AsyncClient(timeout=3600) as client:
                 async with client.stream("POST", API_URL, json=payload) as resp:
