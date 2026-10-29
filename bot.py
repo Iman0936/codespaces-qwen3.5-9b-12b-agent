@@ -459,6 +459,14 @@ def _is_mem_write(cmd: str) -> bool:
 def _all_mem_writes(cmd_texts: list) -> bool:
     return bool(cmd_texts) and all(_is_mem_write(c) for c in cmd_texts)
 
+# A lone heredoc file-write: cat > file << 'EOF' ... EOF and nothing else.
+HEREDOC_WRITE_RE = re.compile(r"cat\s*>\s*([^\s]+)\s*<<\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*\n(.*?)\n\2\s*$", re.DOTALL)
+# Explicit machine intent in the user's own words — never intercept these.
+MACHINE_INTENT_RE = re.compile(r"بساز|ایجاد کن|ذخیره|اجرا|نصب کن|سیو|\bcreate\b|\bsave\b|\brun\b|\binstall\b|\bexecute\b", re.IGNORECASE)
+# File types that make sense as reading material in chat.
+CHAT_FILE_EXTS = {"py", "js", "ts", "jsx", "tsx", "java", "c", "h", "cpp", "hpp", "cs", "go", "rs", "php", "rb", "sh", "bash", "html", "css", "json", "yaml", "yml", "xml", "sql", "txt", "md"}
+
+
 async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     history = histories.setdefault(chat_id, [])
@@ -560,6 +568,23 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 except ValueError:
                     cmd_texts.append("")
             silent = _all_mem_writes(cmd_texts)
+            # Chat delivery: on the first step, a lone heredoc write is
+            # the model "writing" something for the user to READ. Unless
+            # the user explicitly asked for machine work, hand the file's
+            # content over in chat as the answer — no disk write, no
+            # confirm gate. (Prompt rules alone failed at this twice;
+            # the harness enforces it instead.)
+            if _step == 0 and len(calls) == 1 and cmd_texts and not silent:
+                _hw = HEREDOC_WRITE_RE.match(cmd_texts[0].strip())
+                if _hw and not MACHINE_INTENT_RE.search(update.message.text or ""):
+                    _fname = _hw.group(1).split("/")[-1]
+                    _ext = _fname.rsplit(".", 1)[-1].lower() if "." in _fname else ""
+                    if _fname != "memory.txt" and (not _ext or _ext in CHAT_FILE_EXTS):
+                        _answer = f"📄 {_fname}\n\n{_hw.group(3).strip()}"
+                        history.append({"role": "assistant", "content": _answer})
+                        _save_histories()
+                        await box.show(compose(full_reasoning, _answer, final=True))
+                        return
             note = (f"🛠 در حال اجرا: {names}" if not cmd_texts or silent else
                     f"🛠 ابزارها آماده‌ان — دستور ترمینال منتظر تأیید توئه: {names}")
             await box.seal_with_note(compose(full_reasoning, visible, final=True) + _calls_suffix(calls), note)
