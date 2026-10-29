@@ -104,7 +104,6 @@ def build_system_prompt() -> str:
     prompt = (
         "You are a brilliant, highly analytical AI Agent with root terminal access "
         "inside a Linux GitHub Codespace. "
-        f"Current Time: {now_teh:%Y-%m-%d %H:%M} Tehran ({now_utc:%H:%M} UTC).\n"
         "CRITICAL RULES:\n"
         "1. REASON IN ENGLISH, SPEAK IN PERSIAN: To maximize your analytical IQ, you MUST do all your deep reasoning, problem-solving, and planning in English STRICTLY inside your thinking. Your thinking must be 100% English — NEVER write Persian or any other language inside your thinking, not even a single word. If a thought starts forming in Persian, restart that thought in English. However, your final direct message to the user MUST be exclusively in beautifully formatted Persian (فارسی).\n"
         "2. TOOLS ARE YOUR HANDS: You act ONLY through native tool calls (run_command, read_file, list_files, fetch_url, send_file, get_datetime). NEVER print a command as plain text or inside a code block for the user to run — CALL the tool instead. A reply that merely describes a command without calling it is a failure.\n"
@@ -120,6 +119,9 @@ def build_system_prompt() -> str:
     if log_data:
         prompt += f"\n\n--- AUTO SYSTEM LOGS ---\n{log_data}\n------------------------"
     prompt += "\n\nFINAL REMINDER: Think ONLY in English — no Persian inside the thinking, ever. Reply to the user ONLY in Persian."
+    # The clock goes LAST on purpose: it changes every minute, and
+    # anything placed after it would fall out of the server prompt cache.
+    prompt += f"\nCurrent Time: {now_teh:%Y-%m-%d %H:%M} Tehran ({now_utc:%H:%M} UTC)."
     return prompt
 
 
@@ -143,6 +145,13 @@ THINK_EXAMPLE = [
     {"role": "user", "content": "پایتخت فرانسه کجاست؟"},
     {"role": "assistant", "content": "<think>\nThe user is asking for the capital of France. That is Paris. I will answer directly and briefly in Persian.\n</think>\n\nپایتخت فرانسه پاریسه."},
 ]
+
+
+# Appended to the current user message in the REQUEST COPY only — the
+# stored history keeps the user's clean text. Sitting immediately
+# before generation, it is the strongest think-language lever, and no
+# chat template can strip it.
+THINK_SUFFIX = "\n\n(Think in English only — never in Persian inside your thinking. Reply in Persian only.)"
 
 
 def is_error_result(result: str) -> bool:
@@ -461,7 +470,14 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         last_edit, last_shown = 0.0, ""
         last_tp, last_tp_at, last_tp_args = "", 0.0, 0
         try:
-            payload = {"model": MODEL_ALIAS, "messages": [{"role": "system", "content": system_prompt}] + EXAMPLE + THINK_EXAMPLE + messages, "tools": TOOLS,
+            payload_messages = [{"role": "system", "content": system_prompt}] + EXAMPLE + THINK_EXAMPLE + list(messages)
+            for _i in range(len(payload_messages) - 1, -1, -1):
+                if payload_messages[_i].get("role") == "user":
+                    _m = dict(payload_messages[_i])
+                    _m["content"] = (_m.get("content") or "") + THINK_SUFFIX
+                    payload_messages[_i] = _m
+                    break
+            payload = {"model": MODEL_ALIAS, "messages": payload_messages, "tools": TOOLS,
                        "max_tokens": MAX_TOKENS, "stream": True, **SAMPLING}
             async with httpx.AsyncClient(timeout=3600) as client:
                 async with client.stream("POST", API_URL, json=payload) as resp:
