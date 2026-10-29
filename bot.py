@@ -574,7 +574,12 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     args = {}
                 if c["name"] == "run_command" and not approved:
                     result = ("CANCELLED: the user declined to run this command. "
-                              "Do NOT retry it — continue without it or ask the user how to proceed.")
+                              "The user does NOT want this done through the terminal. "
+                              "Do NOT call run_command again for this request, and do NOT "
+                              "re-issue the same command or any variation of it. If the "
+                              "user's request can be answered with content (code, text, "
+                              "an explanation), put that content directly in your reply "
+                              "now — that is what the user wants.")
                 else:
                     result = await exec_tool(c["name"], args, context, chat_id)
                 if c["name"] == "run_command" and approved:
