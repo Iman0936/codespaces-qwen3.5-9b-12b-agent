@@ -203,33 +203,54 @@ launch_server() {  # $1 = extra args; returns wait_health's code
 if [ "$(health_code)" = "200" ]; then
   echo "    model server is up ✅"
 else
-  # Kill-first (the user's rule): when the server is not healthy, clear
-  # whatever is there — hung, half-loaded, dead — and confirm the port
-  # is free BEFORE launching, so a leftover process can never poison
-  # the new start. The bot is stopped too: its watchdog relaunches the
-  # server on its own and would race this script.
-  echo "    clearing any old or hung model server first..."
-  pkill -f "python.*bot\.py" 2>/dev/null || true
-  kill_server || { echo "    ❌ an old llama-server refuses to die — restart the codespace itself, then run start.sh again."; exit 1; }
-  rc=0; launch_server "$EXTRA_ARGS" || rc=$?
-  if [ $rc -eq 2 ]; then
-    echo "    ⚠️ the load stalled (no progress for ~90s) — killing it and relaunching once..."
-    kill_server || { echo "    ❌ the stalled server refuses to die — restart the codespace itself."; exit 1; }
-    rc=0; launch_server "$EXTRA_ARGS" || rc=$?
-  fi
-  if [ $rc -eq 1 ] && [ -n "$EXTRA_ARGS" ]; then
-    echo "    launch with extra args died — retrying plain (see server.log)"
-    kill_server || true
-    rc=0; launch_server "" || rc=$?
-  fi
-  if [ $rc -ne 0 ]; then
-    if [ $rc -eq 3 ]; then
-      echo "    ⏳ the server is alive and STILL loading in the background (slow disk)."
-      echo "       Wait a minute, then run 'bash start.sh' again — it will find the server up and just start the bot."
-    else
-      echo "    ❌ server failed — last server.log lines:"; tail -20 server.log
+  SERVER_UP=0
+  # A server process exists but is not healthy yet. Loading or hung?
+  # Sample its log and CPU for ~16s: progress means ADOPT it (wait for
+  # the load already under way — killing it would restart the load
+  # from zero); frozen means it is hung.
+  srv_pid=$(pgrep -f "llama-server.*--port 8080" | head -1 || true)
+  if [ -n "$srv_pid" ]; then
+    m0=$(stat -c %Y server.log 2>/dev/null || echo 0)
+    c0=$(awk '{print $14+$15}' /proc/$srv_pid/stat 2>/dev/null || echo 0)
+    sleep 16
+    m1=$(stat -c %Y server.log 2>/dev/null || echo 0)
+    c1=$(awk '{print $14+$15}' /proc/$srv_pid/stat 2>/dev/null || echo 0)
+    if [ "$m1" != "$m0" ] || [ "$c1" != "$c0" ]; then
+      echo "    a server is already loading and making progress — waiting for it..."
+      rc=0; wait_health "$srv_pid" || rc=$?
+      [ $rc -eq 0 ] && SERVER_UP=1
     fi
-    exit 1
+  fi
+  if [ $SERVER_UP -eq 0 ]; then
+    # Kill-first (the user's rule): clear whatever is there — hung,
+    # half-loaded, dead — and confirm the port is free BEFORE
+    # launching, so a leftover process can never poison the new start.
+    # The bot is stopped too: its watchdog relaunches the server on
+    # its own and would race this script.
+    echo "    clearing any old or hung model server first..."
+    pkill -f "python.*bot\.py" 2>/dev/null || true
+    kill_server || { echo "    ❌ an old llama-server refuses to die — restart the codespace itself, then run start.sh again."; exit 1; }
+    rc=0; launch_server "$EXTRA_ARGS" || rc=$?
+    if [ $rc -eq 2 ]; then
+      echo "    ⚠️ the load stalled (no progress for ~90s) — killing it and relaunching once..."
+      kill_server || { echo "    ❌ the stalled server refuses to die — restart the codespace itself."; exit 1; }
+      rc=0; launch_server "$EXTRA_ARGS" || rc=$?
+    fi
+    if [ $rc -eq 1 ] && [ -n "$EXTRA_ARGS" ]; then
+      echo "    launch with extra args died — retrying plain (see server.log)"
+      kill_server || true
+      rc=0; launch_server "" || rc=$?
+    fi
+    if [ $rc -ne 0 ]; then
+      if [ $rc -eq 3 ]; then
+        echo "    ⏳ the server is alive and STILL loading in the background (slow disk)."
+        echo "       Run 'bash start.sh' again in a minute — it will wait for this same server, not restart it."
+      else
+        echo "    ❌ server failed — last server.log lines:"; tail -20 server.log
+      fi
+      exit 1
+    fi
+    SERVER_UP=1
   fi
   echo "    model server is up ✅"
 fi
