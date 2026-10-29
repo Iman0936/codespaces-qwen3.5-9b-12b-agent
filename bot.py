@@ -106,7 +106,7 @@ def build_system_prompt() -> str:
         "inside a Linux GitHub Codespace. "
         "CRITICAL RULES:\n"
         "1. REASON IN ENGLISH, SPEAK IN PERSIAN: To maximize your analytical IQ, you MUST do all your deep reasoning, problem-solving, and planning in English STRICTLY inside your thinking. Your thinking must be 100% English — NEVER write Persian or any other language inside your thinking, not even a single word. If a thought starts forming in Persian, restart that thought in English. However, your final direct message to the user MUST be exclusively in beautifully formatted Persian (فارسی).\n"
-        "2. TOOLS ARE YOUR HANDS: You act ONLY through native tool calls (run_command, read_file, list_files, fetch_url, send_file, get_datetime). NEVER print a command as plain text or inside a code block for the user to run — CALL the tool instead. A reply that merely describes a command without calling it is a failure.\n"
+        "2. TOOLS ARE FOR ACTING ON THE MACHINE, NOT FOR ANSWERING: Use native tool calls (run_command, read_file, list_files, fetch_url, send_file, get_datetime) when the user wants something DONE on this machine — creating or changing real files, running or installing something, checking system state, fetching a page. But when the user asks you to WRITE, SHOW or SEND content for them to read — a code snippet, a text, an explanation — put that content directly in your reply (code inside a code block) and do NOT call any tool for it. 'Write me a Python code' means show the code in chat; never create a file unless the user explicitly asks for a file on the machine. And when the user DOES ask for a machine action, never merely describe the command in text — call the tool.\n"
         "3. MAXIMIZE EFFICIENCY: Work fast. You are highly encouraged to emit MULTIPLE tool calls in a single response when they are independent, or chain shell commands using `&&`, to accomplish tasks in fewer steps.\n"
         "4. FILE OVERWRITE: Always use `>` to overwrite files, never `>>` for code (to avoid indentation issues). Save python code via `cat > script.py << 'EOF'`.\n"
         "5. ANTI-BOT & TOR BYPASS: If a website blocks you, use Tor (`socks5h://127.0.0.1:9050`) or `curl_cffi`. IMPORTANT: The Tor daemon is NOT running by default! You MUST start it first using run_command (`tor &`) and wait a few seconds before using the proxy.\n"
@@ -152,6 +152,14 @@ THINK_EXAMPLE = [
 # before generation, it is the strongest think-language lever, and no
 # chat template can strip it.
 THINK_SUFFIX = "\n\n(Think in English only — never in Persian inside your thinking. Reply in Persian only.)"
+
+
+# A "write me code" exchange: content meant for the user's eyes goes in
+# the reply itself (code in a code block), never through a tool.
+CODE_EXAMPLE = [
+    {"role": "user", "content": "یه کد پایتون بنویس که اعداد ۱ تا ۱۰ رو چاپ کنه."},
+    {"role": "assistant", "content": "<think>\nThe user wants a Python code snippet to read in chat. This is content for the user's eyes, not a machine action, so I will put the code directly in my reply and not call any tool.\n</think>\n\nحتماً، این کد اعداد ۱ تا ۱۰ رو چاپ می‌کنه:\n\n```python\nfor i in range(1, 11):\n    print(i)\n```"},
+]
 
 
 def is_error_result(result: str) -> bool:
@@ -470,7 +478,7 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         last_edit, last_shown = 0.0, ""
         last_tp, last_tp_at, last_tp_args = "", 0.0, 0
         try:
-            payload_messages = [{"role": "system", "content": system_prompt}] + EXAMPLE + THINK_EXAMPLE + list(messages)
+            payload_messages = [{"role": "system", "content": system_prompt}] + EXAMPLE + THINK_EXAMPLE + CODE_EXAMPLE + list(messages)
             for _i in range(len(payload_messages) - 1, -1, -1):
                 if payload_messages[_i].get("role") == "user":
                     _m = dict(payload_messages[_i])
