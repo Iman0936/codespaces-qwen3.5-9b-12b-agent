@@ -466,7 +466,6 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     while len(history) > 2 and sum(len(m["content"]) for m in history) > MAX_HISTORY_CHARS:
         del history[:2]
     messages = list(history)
-    cancels = 0
 
     system_prompt = build_system_prompt()
     first = await update.message.reply_text("🧠 دارم فکر می‌کنم...")
@@ -567,22 +566,20 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             approved = True
             if cmd_texts and not silent:
                 approved = await ask_confirm(context, chat_id, cmd_texts)
+            if not approved:
+                # The owner's cancel ends the turn on the spot. Nothing
+                # has executed yet and nothing is fed back to the model,
+                # so it cannot re-issue the command or improvise a
+                # variation. The confirm message already reads
+                # "🚫 اجرای دستور لغو شد." — that stays the last word.
+                return
             for i, c in enumerate(calls):
                 try:
                     args = json.loads(c["arguments"] or "{}")
                 except ValueError:
                     args = {}
-                if c["name"] == "run_command" and not approved:
-                    result = ("CANCELLED: the user declined to run this command. "
-                              "The user does NOT want this done through the terminal. "
-                              "Do NOT call run_command again for this request, and do NOT "
-                              "re-issue the same command or any variation of it. If the "
-                              "user's request can be answered with content (code, text, "
-                              "an explanation), put that content directly in your reply "
-                              "now — that is what the user wants.")
-                else:
-                    result = await exec_tool(c["name"], args, context, chat_id)
-                if c["name"] == "run_command" and approved:
+                result = await exec_tool(c["name"], args, context, chat_id)
+                if c["name"] == "run_command":
                     log_command(args.get("command", ""), is_error_result(result))
                 if is_error_result(result):
                     tool_error_streak[chat_id] = tool_error_streak.get(chat_id, 0) + 1
@@ -590,13 +587,6 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     tool_error_streak[chat_id] = 0
                 messages.append({"role": "tool", "tool_call_id": f"call_{i}",
                                  "content": result})
-            if cmd_texts and not approved:
-                cancels += 1
-                if cancels >= 2:
-                    await _send(context, chat_id, "🚫 دو لغو پیاپی — این دور متوقف شد. هر وقت آماده بودی دوباره بگو.")
-                    return
-            elif cmd_texts:
-                cancels = 0
             if tool_error_streak.get(chat_id, 0) >= 3:
                 tool_error_streak[chat_id] = 0
                 await _send(context, chat_id,
@@ -628,8 +618,8 @@ async def run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── Fable's confirm gate, rebuilt for the live loop ──────────────────────────
 # Terminal commands wait for the owner's ✅/❌ (buttons, or the words
-# تایید/لغو). All other tools run immediately. A cancelled command is
-# reported back to the model as a tool result — never counted as an error.
+# تایید/لغو). All other tools run immediately. A cancel ends the turn
+# on the spot — nothing is executed and nothing is fed to the model.
 PENDING_CONFIRMS: dict[int, dict] = {}
 BUSY_CHATS: set[int] = set()
 CONFIRM_TIMEOUT = 600
