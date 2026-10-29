@@ -129,12 +129,12 @@ fi
 echo "==> [5/5] model server + bot"
 source config.env
 
-# Already running? Nothing to do. (Process pattern only — a pid file's
-# number can collide with an unrelated process after a container
-# restart, so it is never trusted as proof of life.)
-if pgrep -f "python.*bot\.py" >/dev/null; then
-  echo "    ✅ already running — the bot is up."
-  echo "       Restart it with:  bash stop.sh && bash start.sh"
+# Fully up already? Nothing to do. (Process pattern only — a pid
+# file's number can collide with an unrelated process after a
+# container restart, so it is never trusted as proof of life.)
+if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health 2>/dev/null)" = "200" ] && pgrep -f "python.*bot\.py" >/dev/null; then
+  echo "    ✅ already running — server and bot are up."
+  echo "       Restart them with:  bash stop.sh && bash start.sh"
   exit 0
 fi
 
@@ -151,40 +151,93 @@ EOF
   chmod +x server_cmd.sh
 }
 
-wait_health() {  # $1 = pid to death-check; returns 0 when healthy
-  for i in $(seq 1 90); do
-    code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health || true)"
-    [ "$code" = "200" ] && return 0
-    kill -0 "$1" 2>/dev/null || return 1
-    [ $((i % 5)) -eq 0 ] && echo "    … loading the model ($((i * 2))s)"
-    sleep 2
-  done
+health_code() { curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health 2>/dev/null || echo 000; }
+
+# Kill every llama-server on our port and CONFIRM it is gone before
+# anyone relaunches — a hung server can shrug off a polite kill, and
+# a relaunch onto a still-held port dies instantly.
+kill_server() {
+  pkill -f "llama-server.*--port 8080" 2>/dev/null || true
+  for i in $(seq 1 10); do pgrep -f "llama-server.*--port 8080" >/dev/null || return 0; sleep 1; done
+  pkill -9 -f "llama-server.*--port 8080" 2>/dev/null || true
+  for i in $(seq 1 5); do pgrep -f "llama-server.*--port 8080" >/dev/null || return 0; sleep 1; done
   return 1
 }
 
-code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health || true)"
-if [ "$code" != "200" ]; then
-  pkill -f "llama-server.*--port 8080" 2>/dev/null || true
-  sleep 1
-  write_server_cmd "$EXTRA_ARGS"
+# Wait for the server to load. Return codes: 0 = healthy,
+# 1 = process died, 2 = STALLED (log and CPU both frozen ~90s — the
+# signature of a load stuck on a stalled disk), 3 = still making
+# progress but not done after 300s.
+wait_health() {  # $1 = pid to watch
+  local pid=$1 i mtime cpu prev_mtime prev_cpu frozen=0
+  prev_mtime=$(stat -c %Y server.log 2>/dev/null || echo 0)
+  prev_cpu=$(awk '{print $14+$15}' /proc/$pid/stat 2>/dev/null || echo 0)
+  for i in $(seq 1 150); do
+    [ "$(health_code)" = "200" ] && return 0
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ $((i % 5)) -eq 0 ] && echo "    … loading the model ($((i * 2))s)"
+    if [ $((i % 8)) -eq 0 ]; then  # progress check every ~16s
+      mtime=$(stat -c %Y server.log 2>/dev/null || echo 0)
+      cpu=$(awk '{print $14+$15}' /proc/$pid/stat 2>/dev/null || echo 0)
+      if [ "$mtime" = "$prev_mtime" ] && [ "$cpu" = "$prev_cpu" ]; then
+        frozen=$((frozen + 1))
+      else
+        frozen=0
+      fi
+      prev_mtime=$mtime; prev_cpu=$cpu
+      [ $frozen -ge 6 ] && return 2  # ~96s with zero progress
+    fi
+    sleep 2
+  done
+  return 3
+}
+
+launch_server() {  # $1 = extra args; returns wait_health's code
+  write_server_cmd "$1"
   setsid nohup bash server_cmd.sh >/dev/null 2>&1 &
   echo $! > server.pid
-  echo "    model server starting (pid $(cat server.pid)) — waiting for it to load..."
-  if ! wait_health "$(cat server.pid)"; then
-    if [ -n "$EXTRA_ARGS" ]; then
-      echo "    launch with extra args died — retrying plain (see server.log)"
-      pkill -f "llama-server.*--port 8080" 2>/dev/null || true
-      sleep 1
-      write_server_cmd ""
-      setsid nohup bash server_cmd.sh >/dev/null 2>&1 &
-      echo $! > server.pid
-      wait_health "$(cat server.pid)" || { echo "    ❌ server DIED — last server.log lines:"; tail -20 server.log; exit 1; }
-    else
-      echo "    ❌ server DIED — last server.log lines:"; tail -20 server.log; exit 1
-    fi
+  echo "    model server starting (pid $!) — waiting for it to load..."
+  wait_health "$!"
+}
+
+if [ "$(health_code)" = "200" ]; then
+  echo "    model server is up ✅"
+else
+  # Kill-first (the user's rule): when the server is not healthy, clear
+  # whatever is there — hung, half-loaded, dead — and confirm the port
+  # is free BEFORE launching, so a leftover process can never poison
+  # the new start. The bot is stopped too: its watchdog relaunches the
+  # server on its own and would race this script.
+  echo "    clearing any old or hung model server first..."
+  pkill -f "python.*bot\.py" 2>/dev/null || true
+  kill_server || { echo "    ❌ an old llama-server refuses to die — restart the codespace itself, then run start.sh again."; exit 1; }
+  rc=0; launch_server "$EXTRA_ARGS" || rc=$?
+  if [ $rc -eq 2 ]; then
+    echo "    ⚠️ the load stalled (no progress for ~90s) — killing it and relaunching once..."
+    kill_server || { echo "    ❌ the stalled server refuses to die — restart the codespace itself."; exit 1; }
+    rc=0; launch_server "$EXTRA_ARGS" || rc=$?
   fi
+  if [ $rc -eq 1 ] && [ -n "$EXTRA_ARGS" ]; then
+    echo "    launch with extra args died — retrying plain (see server.log)"
+    kill_server || true
+    rc=0; launch_server "" || rc=$?
+  fi
+  if [ $rc -ne 0 ]; then
+    if [ $rc -eq 3 ]; then
+      echo "    ⏳ the server is alive and STILL loading in the background (slow disk)."
+      echo "       Wait a minute, then run 'bash start.sh' again — it will find the server up and just start the bot."
+    else
+      echo "    ❌ server failed — last server.log lines:"; tail -20 server.log
+    fi
+    exit 1
+  fi
+  echo "    model server is up ✅"
 fi
-echo "    model server is up ✅"
+
+if pgrep -f "python.*bot\.py" >/dev/null; then
+  echo "    ✅ already running — the bot is up."
+  exit 0
+fi
 
 set -a; source secrets.env; set +a
 if [ -x .venv/bin/python ]; then PY=.venv/bin/python; else PY=python3; fi
