@@ -1,12 +1,1 @@
-{
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
-  "name": "qwen35-telegram-agent",
-  "hostRequirements": {
-    "cpus": 4,
-    "memory": "16gb",
-    "storage": "32gb"
-  },
-  "postCreateCommand": "bash setup.sh",
-  "postStartCommand": "bash autostart.sh",
-  "shutdownAction": "stop"
-}
+{"hostRequirements":{"cpus":4,"memory":"16gb","storage":"32gb"},"image":"mcr.microsoft.com/devcontainers/base:ubuntu","name":"qwen35-telegram-agent"}
