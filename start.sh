@@ -7,14 +7,16 @@
 # and it does — in front of you, in this terminal — whatever is still
 # missing, then starts the model server + the bot:
 #   1. bot token + your numeric ID   (asked ONCE, saved in secrets.env)
-#   2. llama.cpp binary              (downloaded once, then cached)
-#   3. the model                     (downloaded once, cached in models/)
+#   2. llama.cpp binary              (in /tmp — re-downloaded per start)
+#   3. the model                     (in /tmp — re-downloaded per start)
 #   4. Python deps                   (installed once, into .venv)
 #   5. server + bot                  (started detached — they keep
 #                                     running when you close the terminal)
 # Run it again any time: everything already done is skipped in seconds.
 # Stop the processes with:   bash stop.sh    (or just stop the codespace —
-# files, model cache, credentials and the agent's memory all persist).
+# credentials and the agent's memory persist in the workspace; the model
+# and llama.cpp live in /tmp and are wiped with the container, so the
+# codespace GitHub has to resume stays light).
 # ─────────────────────────────────────────────────────────────────────────────
 cd "$(dirname "$0")"
 
@@ -29,7 +31,24 @@ EXTRA_ARGS=""
 # ====================================================================
 
 MODEL_FILE="$(basename "${MODEL_URL%%\?*}")"
-mkdir -p models llama
+# Heavy artifacts live in /tmp, NOT the workspace. Per GitHub's own
+# docs, everything in /workspaces — and everything else in the
+# container except /tmp — is preserved across a stop/start, which made
+# the persisted codespace ~6 GB heavier and its resume slow and
+# fragile. /tmp is wiped on stop, so the model and the llama.cpp
+# binaries are downloaded fresh on every codespace start, while the
+# workspace keeps only code, .venv, credentials and the agent's memory.
+CACHE_DIR="/tmp/qwen-agent"
+LLAMA_DIR="$CACHE_DIR/llama"
+MODEL_DIR="$CACHE_DIR/models"
+MODEL_PATH="$MODEL_DIR/$MODEL_FILE"
+mkdir -p "$LLAMA_DIR" "$MODEL_DIR"
+# One-time cleanup for codespaces created by older versions: drop the
+# old in-workspace caches so this codespace gets light too.
+if [ -d models ] || [ -d llama ]; then
+  echo "    removing the old in-workspace model/llama cache (they live in /tmp now)..."
+  rm -rf models llama
+fi
 
 echo "==> [1/5] bot credentials"
 if [ -f secrets.env ]; then
@@ -63,35 +82,35 @@ if [ ! -f secrets.env ]; then
 fi
 
 echo "==> [2/5] llama.cpp binary (pinned b11878)"
-if [ ! -x llama/llama-server ]; then
+if [ ! -x "$LLAMA_DIR/llama-server" ]; then
   ASSET_URL="https://github.com/ggml-org/llama.cpp/releases/download/b11878/llama-b11878-bin-ubuntu-x64.tar.gz"
-  mkdir -p llama/extract
-  if curl -fL -o llama/pkg "$ASSET_URL" && tar -xzf llama/pkg -C llama/extract 2>/dev/null; then
-    BIN_PATH="$(find llama/extract -name llama-server -type f | head -1)"
-    [ -n "$BIN_PATH" ] && cp -r "$(dirname "$BIN_PATH")"/. llama/
-    chmod +x llama/llama-server 2>/dev/null || true
+  mkdir -p "$CACHE_DIR/extract"
+  if curl -fL -o "$CACHE_DIR/pkg" "$ASSET_URL" && tar -xzf "$CACHE_DIR/pkg" -C "$CACHE_DIR/extract" 2>/dev/null; then
+    BIN_PATH="$(find "$CACHE_DIR/extract" -name llama-server -type f | head -1)"
+    [ -n "$BIN_PATH" ] && cp -r "$(dirname "$BIN_PATH")"/. "$LLAMA_DIR/"
+    chmod +x "$LLAMA_DIR/llama-server" 2>/dev/null || true
   fi
-  rm -rf llama/extract llama/pkg
+  rm -rf "$CACHE_DIR/extract" "$CACHE_DIR/pkg"
 fi
-if [ ! -x llama/llama-server ]; then
+if [ ! -x "$LLAMA_DIR/llama-server" ]; then
   echo "    prebuilt download failed — building from source (slower)"
-  git clone --depth 1 https://github.com/ggml-org/llama.cpp llama-src
-  cmake -B llama-src/build -S llama-src -DCMAKE_BUILD_TYPE=Release > /dev/null
-  cmake --build llama-src/build -j "$(nproc)" --target llama-server
-  cp llama-src/build/bin/llama-server llama/
-  cp llama-src/build/bin/*.so llama/ 2>/dev/null || true
+  git clone --depth 1 https://github.com/ggml-org/llama.cpp "$CACHE_DIR/llama-src"
+  cmake -B "$CACHE_DIR/llama-src/build" -S "$CACHE_DIR/llama-src" -DCMAKE_BUILD_TYPE=Release > /dev/null
+  cmake --build "$CACHE_DIR/llama-src/build" -j "$(nproc)" --target llama-server
+  cp "$CACHE_DIR/llama-src/build/bin/llama-server" "$LLAMA_DIR/"
+  cp "$CACHE_DIR/llama-src/build/bin/"*.so "$LLAMA_DIR/" 2>/dev/null || true
 fi
-echo "    OK: $(./llama/llama-server --version 2>/dev/null | head -1 || echo 'binary ready')"
+echo "    OK: $("$LLAMA_DIR/llama-server" --version 2>/dev/null | head -1 || echo 'binary ready')"
 
-echo "==> [3/5] model: $MODEL_FILE (cached in the workspace)"
-if [ ! -s "models/$MODEL_FILE" ]; then
-  curl -L -C - -o "models/$MODEL_FILE" "$MODEL_URL"
+echo "==> [3/5] model: $MODEL_FILE (in /tmp — fresh download on every codespace start)"
+if [ ! -s "$MODEL_PATH" ]; then
+  curl -L -C - -o "$MODEL_PATH" "$MODEL_URL"
 else
-  echo "    already downloaded ✅ — using the cache"
+  echo "    already downloaded ✅ — using this session's /tmp cache"
 fi
-ls -lh "models/$MODEL_FILE"
+ls -lh "$MODEL_PATH"
 cat > config.env << EOF_CFG
-MODEL_PATH=models/$MODEL_FILE
+MODEL_PATH=$MODEL_PATH
 MODEL_ALIAS=$MODEL_ALIAS
 MODEL_CTX=$MODEL_CTX
 EXTRA_ARGS="$EXTRA_ARGS"
@@ -144,7 +163,7 @@ write_server_cmd() {
   cat > server_cmd.sh <<EOF
 #!/usr/bin/env bash
 cd "$PWD"
-exec ./llama/llama-server -m "$MODEL_PATH" --jinja -c $MODEL_CTX -t $(nproc) \\
+exec $LLAMA_DIR/llama-server -m "$MODEL_PATH" --jinja -c $MODEL_CTX -t $(nproc) \\
   --cache-type-k q8_0 --cache-type-v q8_0 $1 \\
   --host 127.0.0.1 --port 8080 --alias $MODEL_ALIAS >> server.log 2>&1
 EOF

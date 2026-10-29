@@ -35,8 +35,11 @@ Open the codespace, then:
 bash start.sh
 ```
 
-Model, credentials and memory are all cached in the workspace, so
-this takes about a minute and asks nothing.
+Credentials and memory are cached in the workspace, so nothing is
+asked again. The model and the llama.cpp binaries live in `/tmp`
+(wiped on every codespace stop), so `start.sh` re-downloads them —
+a few minutes once per codespace start, which keeps the persisted
+codespace small and its stop/start resume reliable.
 
 ## Stop
 
@@ -45,9 +48,10 @@ bash stop.sh
 ```
 
 stops the bot and the model server. Stopping the codespace itself
-also works — **everything persists** (model cache, `secrets.env`,
-chat history, the agent's `work/` memory). Only *deleting* the
-codespace wipes it.
+also works — **what persists** is the workspace: `secrets.env`,
+chat history, the agent's `work/` memory and `.venv`. The model and
+llama.cpp live in `/tmp` and are wiped on purpose, so the next start
+re-downloads them. Only *deleting* the codespace wipes the rest.
 
 ## Files
 
@@ -56,7 +60,7 @@ codespace wipes it.
 | `start.sh` | The one command: setup (first time) + start |
 | `stop.sh` | Stops bot + model server |
 | `bot.py` | The agent (Telegram, tools, streaming, memory) |
-| `models/` | Model cache (downloaded once) |
+| `/tmp/qwen-agent/` | Model + llama.cpp cache (outside the workspace; wiped on every codespace stop, re-downloaded on start) |
 | `work/` | The agent's memory: `memory.txt` (its own notes) + `auto_system_log.txt` (every command it runs) |
 | `secrets.env` | Your token + ID (gitignored, never committed) |
 | `server.log` / `bot.log` | Runtime logs — `tail -f bot.log` to watch it work |
